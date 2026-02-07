@@ -1,0 +1,279 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_API: fraud-detector-api
+  ECR_REPOSITORY_MLFLOW: mlflow-server
+  ECS_CLUSTER: mlops-fraud-detection
+  ECS_SERVICE_API: fraud-detector-api-service
+
+jobs:
+  # Job 1: Build and Push Docker Images
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    outputs:
+      api_image: ${{ steps.build-api.outputs.image }}
+      mlflow_image: ${{ steps.build-mlflow.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_API }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push FastAPI image
+        id: build-api
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/fastapi.Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push MLflow image
+        id: build-mlflow
+        uses: docker/build-push-action@v5
+        with:
+          context: ./mlflow
+          file: ./mlflow/Dockerfile
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_MLFLOW }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Set image output
+        run: |
+          echo "image=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_API }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  # Job 2: Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment:
+      name: staging
+      url: https://staging-api.fraud-detector.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition fraud-detector-api-staging \
+            --query taskDefinition > task-definition.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: fraud-detector-api
+          image: ${{ needs.build-and-push.outputs.api_image }}
+
+      - name: Deploy to ECS Staging
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: fraud-detector-api-staging
+          cluster: mlops-fraud-detection-staging
+          wait-for-service-stability: true
+
+      - name: Run smoke tests on staging
+        run: |
+          echo "Running smoke tests against staging environment..."
+          # Wait for service to be healthy
+          sleep 30
+
+          # Test health endpoint
+          curl -f https://staging-api.fraud-detector.example.com/health || exit 1
+
+          # Test prediction endpoint with sample data
+          curl -f -X POST https://staging-api.fraud-detector.example.com/predict \
+            -H "Content-Type: application/json" \
+            -d '{"amount": 100.0, "merchant_category": "retail", "merchant_country": "USA", "hour_of_day": 14, "day_of_week": 3, "is_online": false, "is_weekend": false, "transactions_last_24h": 2, "total_amount_last_24h": 200.0, "transactions_last_1h": 0, "distance_from_home": 5.0}' \
+            || exit 1
+
+          echo "✅ Smoke tests passed"
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "🚀 Staging deployment successful!" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: https://staging-api.fraud-detector.example.com" >> $GITHUB_STEP_SUMMARY
+
+  # Job 3: Manual Approval Gate for Production
+  approve-production:
+    name: Approve Production Deployment
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment:
+      name: production-approval
+    steps:
+      - name: Manual approval checkpoint
+        run: |
+          echo "Waiting for manual approval to deploy to production..."
+          echo "Review staging environment before approving."
+
+  # Job 4: Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-push, approve-production]
+    environment:
+      name: production
+      url: https://api.fraud-detector.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition fraud-detector-api-production \
+            --query taskDefinition > task-definition.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: fraud-detector-api
+          image: ${{ needs.build-and-push.outputs.api_image }}
+
+      - name: Deploy to ECS Production (Blue-Green)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE_API }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          codedeploy-appspec: deployment/appspec.yml
+          codedeploy-application: fraud-detector-app
+          codedeploy-deployment-group: fraud-detector-dg
+
+      - name: Monitor production deployment
+        run: |
+          echo "Monitoring production deployment..."
+          # Wait for service to stabilize
+          sleep 60
+
+          # Check CloudWatch metrics
+          echo "Checking error rate..."
+          # In production, query CloudWatch for error rate
+
+          echo "Checking latency..."
+          # In production, query CloudWatch for p95 latency
+
+      - name: Run production smoke tests
+        run: |
+          echo "Running production smoke tests..."
+
+          # Test health endpoint
+          curl -f https://api.fraud-detector.example.com/health || exit 1
+
+          # Test prediction endpoint
+          curl -f -X POST https://api.fraud-detector.example.com/predict \
+            -H "Content-Type: application/json" \
+            -d '{"amount": 100.0, "merchant_category": "retail", "merchant_country": "USA", "hour_of_day": 14, "day_of_week": 3, "is_online": false, "is_weekend": false, "transactions_last_24h": 2, "total_amount_last_24h": 200.0, "transactions_last_1h": 0, "distance_from_home": 5.0}' \
+            || exit 1
+
+          echo "✅ Production smoke tests passed"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "🚨 Deployment failed, rolling back..."
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE_API }} \
+            --force-new-deployment \
+            --task-definition fraud-detector-api-production:PREVIOUS
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "🎉 Production deployment successful!" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: https://api.fraud-detector.example.com" >> $GITHUB_STEP_SUMMARY
+
+          # In production, send Slack notification
+          # curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} ...
+
+  # Job 5: Tag Release
+  tag-release:
+    name: Tag Release
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and create tag
+        run: |
+          # Get latest tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $LATEST_TAG"
+
+          # Increment patch version
+          NEW_TAG=$(echo $LATEST_TAG | awk -F. '{$NF = $NF + 1;} 1' | sed 's/ /./g')
+          echo "New tag: $NEW_TAG"
+
+          # Create and push tag
+          git tag -a $NEW_TAG -m "Release $NEW_TAG"
+          git push origin $NEW_TAG
+
+          echo "📦 Created release tag: $NEW_TAG" >> $GITHUB_STEP_SUMMARY

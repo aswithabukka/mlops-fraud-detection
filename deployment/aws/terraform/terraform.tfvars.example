@@ -1,0 +1,100 @@
+# Example Terraform Variables Configuration
+# Copy this file to terraform.tfvars and fill in your values
+
+# AWS Configuration
+aws_region  = "us-east-1"
+environment = "production"  # dev, staging, or production
+
+# Database Configuration
+db_name     = "mlflow"
+db_username = "mlflow"
+db_password = "CHANGEME_STRONG_PASSWORD_HERE"  # Use AWS Secrets Manager in production
+
+# RDS Configuration
+rds_instance_class        = "db.t3.small"      # db.t3.micro (free tier), db.t3.small, db.t3.medium
+rds_allocated_storage     = 20                 # GB (20-1000)
+rds_multi_az              = false              # Set to true for production HA
+rds_backup_retention_days = 7                  # Days to retain backups
+
+# ECS Configuration - FastAPI Service
+api_desired_count = 2   # Number of tasks
+api_min_capacity  = 2   # Autoscaling minimum
+api_max_capacity  = 10  # Autoscaling maximum
+api_cpu           = 1024  # 1 vCPU = 1024 CPU units
+api_memory        = 2048  # MB
+
+# S3 Configuration
+s3_versioning_enabled = true   # Enable versioning for data/artifact buckets
+s3_lifecycle_days     = 90     # Days before transitioning to cheaper storage
+
+# CloudWatch Logs
+log_retention_days = 30  # Days to retain logs
+
+# SSL/TLS (Optional - for HTTPS)
+# Create an ACM certificate first, then add ARN here
+acm_certificate_arn = ""  # e.g., "arn:aws:acm:us-east-1:123456789012:certificate/..."
+
+# Alerting
+alert_email_addresses = ["your-email@example.com"]  # Receive CloudWatch alarms
+enable_slack_alerts   = false
+slack_webhook_url     = ""  # Your Slack webhook URL
+
+# Monitoring
+enable_enhanced_monitoring = false  # Additional cost for detailed RDS metrics
+monitoring_interval        = 60     # Seconds (0, 1, 5, 10, 15, 30, 60)
+
+# Cost Optimization
+use_spot_instances         = false  # Use Fargate Spot (70% cheaper, less reliable)
+enable_deletion_protection = true   # Prevent accidental RDS deletion
+
+# Domain (Optional)
+domain_name            = ""     # e.g., "fraud-detector.example.com"
+create_route53_records = false  # Create DNS records
+
+# Additional Tags
+additional_tags = {
+  CostCenter = "MLOps"
+  Team       = "Data-Science"
+}
+
+# Example Production Configuration
+# ==============================
+# environment                = "production"
+# rds_instance_class         = "db.t3.medium"
+# rds_multi_az               = true
+# rds_backup_retention_days  = 14
+# api_desired_count          = 3
+# api_min_capacity           = 3
+# api_max_capacity           = 20
+# enable_enhanced_monitoring = true
+# enable_deletion_protection = true
+# acm_certificate_arn        = "arn:aws:acm:us-east-1:123456789012:certificate/..."
+
+# Example Development Configuration
+# ==================================
+# environment               = "dev"
+# rds_instance_class        = "db.t3.micro"
+# rds_multi_az              = false
+# rds_backup_retention_days = 3
+# api_desired_count         = 1
+# api_min_capacity          = 1
+# api_max_capacity          = 2
+# use_spot_instances        = true
+# log_retention_days        = 7
+
+# Estimated Monthly Costs
+# =======================
+# Development:  $50-80/month
+# - RDS db.t3.micro: $15
+# - ECS Fargate (1 task): $20
+# - S3: $5
+# - ALB: $20
+# - Misc: $10
+#
+# Production: $150-200/month
+# - RDS db.t3.medium Multi-AZ: $70
+# - ECS Fargate (3 tasks): $60
+# - S3: $10
+# - ALB: $20
+# - CloudWatch/Monitoring: $10
+# - Misc: $20

@@ -212,11 +212,11 @@ Estimated cost: **$130-150/month**
 
 ## 📚 Documentation
 
-- [Architecture Deep Dive](docs/architecture.md)
-- [API Documentation](docs/api.md)
-- [Development Guide](docs/development.md)
-- [Deployment Guide](docs/deployment.md)
-- [Interview Preparation Guide](docs/interview_guide.md)
+- **[GUIDE.md](GUIDE.md)** - Complete technical guide (5000+ words)
+- **[INTERVIEW_PREP_GUIDE.md](INTERVIEW_PREP_GUIDE.md)** - 4-week learning path, 50+ Q&A, demo script
+- **[DEPLOYMENT_GUIDE.md](deployment/DEPLOYMENT_GUIDE.md)** - AWS deployment step-by-step
+- **[ENTERPRISE_GRADE_COMPLETE.md](ENTERPRISE_GRADE_COMPLETE.md)** - Complete project summary
+- **[CLAUDE.md](CLAUDE.md)** - Project instructions for AI assistants
 
 ## 🎯 Key Learnings & Interview Talking Points
 
