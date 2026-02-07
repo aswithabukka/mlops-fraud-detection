@@ -2615,6 +2615,835 @@ A: "Both AWS and GCP are excellent for ML, but they have different strengths:
 
 For startups, I'd recommend GCP for cost savings and simplicity. For enterprises, AWS for ecosystem and talent pool. Ideally, design cloud-agnostic architecture (what we did with Terraform + open-source tools) so you can switch if needed."
 
+### 8.9 Azure Alternative Architecture
+
+For complete interview preparation, let's explore how to implement our MLOps pipeline on **Microsoft Azure** - the second-largest cloud provider with strong enterprise adoption.
+
+#### AWS to Azure Service Mapping
+
+| AWS Service | Azure Equivalent | Purpose | Key Differences |
+|-------------|------------------|---------|-----------------|
+| **ECS Fargate** | Azure Container Apps / AKS | Container orchestration | Container Apps is serverless, AKS is managed Kubernetes |
+| **RDS PostgreSQL** | Azure Database for PostgreSQL | Managed database | Azure has Flexible Server (newer) vs Single Server |
+| **S3** | Azure Blob Storage | Object storage | Blob Storage has hot/cool/archive tiers built-in |
+| **ALB** | Azure Application Gateway / Front Door | Load balancer | Application Gateway is regional, Front Door is global |
+| **ECR** | Azure Container Registry (ACR) | Docker images | ACR supports geo-replication out-of-the-box |
+| **CloudWatch** | Azure Monitor + Log Analytics | Observability | Azure Monitor integrates with Application Insights |
+| **IAM** | Azure Active Directory (AAD) + RBAC | Security | AAD is identity-focused, RBAC for resource permissions |
+| **Secrets Manager** | Azure Key Vault | Secrets storage | Key Vault also handles keys and certificates |
+| **Lambda** | Azure Functions | Serverless compute | Similar capabilities, different triggers |
+| **Step Functions** | Azure Logic Apps / Durable Functions | Orchestration | Logic Apps is low-code, Durable Functions is code-first |
+
+#### Azure MLOps Architecture
+
+**Our pipeline reimagined on Azure**:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Microsoft Azure MLOps Architecture                          │
+└─────────────────────────────────────────────────────────────┘
+
+                        ┌─────────────────┐
+                        │   Internet      │
+                        └────────┬────────┘
+                                 │
+              ┌──────────────────▼──────────────────┐
+              │  Azure Front Door (Global CDN)      │
+              │  - WAF (Web Application Firewall)   │
+              │  - SSL Termination                  │
+              └──────────────┬──────────────────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        │                    │                    │
+  ┌─────▼──────┐      ┌─────▼──────┐      ┌─────▼──────┐
+  │ Container  │      │ Container  │      │ Container  │
+  │ Apps       │      │ Apps       │ ...  │ Apps       │
+  │ (FastAPI)  │      │ (FastAPI)  │      │ (FastAPI)  │
+  │ Instance 1 │      │ Instance 2 │      │ Instance N │
+  └─────┬──────┘      └─────┬──────┘      └─────┬──────┘
+        │                    │                    │
+        └────────────────────┼────────────────────┘
+                             │
+              ┌──────────────▼──────────────────┐
+              │  Azure Database for PostgreSQL  │
+              │  (Flexible Server, Zone-HA)     │
+              │  - MLflow metadata              │
+              │  - Airflow metadata             │
+              └──────────────┬──────────────────┘
+                             │
+              ┌──────────────▼──────────────────┐
+              │  Azure Blob Storage             │
+              │  - Data (raw, processed)        │
+              │  - MLflow artifacts             │
+              │  - Prediction logs              │
+              └─────────────────────────────────┘
+```
+
+#### Azure Services Deep Dive
+
+##### 1. Azure Container Apps - Serverless Container Platform
+
+**What**: Fully managed serverless container service (newest option, combines best of Cloud Run and Kubernetes)
+
+**Why Azure Container Apps**:
+- ✅ Built on Kubernetes (KEDA for auto-scaling)
+- ✅ Simpler than AKS (no cluster management)
+- ✅ Scales to zero (like Cloud Run)
+- ✅ Supports Dapr (distributed application runtime)
+- ✅ Integrated with Azure Monitor
+
+**Our FastAPI on Container Apps**:
+```yaml
+# containerapp.yaml
+properties:
+  managedEnvironmentId: /subscriptions/.../managedEnvironments/mlops-env
+  configuration:
+    ingress:
+      external: true
+      targetPort: 8000
+      transport: auto
+      traffic:
+      - weight: 100
+        latestRevision: true
+    secrets:
+    - name: mlflow-uri
+      value: "postgresql://..."
+    registries:
+    - server: mlopsregistry.azurecr.io
+      username: mlopsregistry
+      passwordSecretRef: acr-password
+  template:
+    containers:
+    - name: fastapi
+      image: mlopsregistry.azurecr.io/mlops-fastapi:latest
+      resources:
+        cpu: 2.0
+        memory: 4Gi
+      env:
+      - name: MLFLOW_TRACKING_URI
+        secretRef: mlflow-uri
+      - name: MODEL_STAGE
+        value: "Production"
+    scale:
+      minReplicas: 2
+      maxReplicas: 100
+      rules:
+      - name: http-scaling
+        http:
+          metadata:
+            concurrentRequests: "50"
+```
+
+**Deploy with Azure CLI**:
+```bash
+# Create Container Apps environment
+az containerapp env create \
+  --name mlops-env \
+  --resource-group mlops-rg \
+  --location eastus
+
+# Deploy FastAPI container app
+az containerapp create \
+  --name mlops-fastapi \
+  --resource-group mlops-rg \
+  --environment mlops-env \
+  --image mlopsregistry.azurecr.io/mlops-fastapi:latest \
+  --target-port 8000 \
+  --ingress external \
+  --cpu 2.0 \
+  --memory 4.0Gi \
+  --min-replicas 2 \
+  --max-replicas 100
+```
+
+**Container Apps vs Alternatives**:
+| Feature | Container Apps | AKS | Cloud Run | ECS Fargate |
+|---------|----------------|-----|-----------|-------------|
+| **Serverless** | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
+| **Kubernetes** | ✅ Built on K8s | ✅ Full K8s | ❌ No | ❌ No |
+| **Scale to Zero** | ✅ Yes | ❌ No | ✅ Yes | ❌ No |
+| **Dapr Support** | ✅ Native | ⚠️ Manual | ❌ No | ❌ No |
+| **Cost** | $$ | $$$ | $ | $$ |
+
+##### 2. Azure Database for PostgreSQL - Flexible Server
+
+**What**: Fully managed PostgreSQL with flexible configuration (newer generation, better than Single Server)
+
+**Why Flexible Server**:
+- ✅ Zone-redundant HA (better than Multi-AZ)
+- ✅ Automatic backups with 35-day retention
+- ✅ Built-in PgBouncer (connection pooling)
+- ✅ Maintenance windows (control when updates happen)
+- ✅ Private endpoint (no public IP needed)
+
+**Our PostgreSQL Setup**:
+```bash
+# Create Flexible Server
+az postgres flexible-server create \
+  --name mlops-postgres \
+  --resource-group mlops-rg \
+  --location eastus \
+  --admin-user mlflow_admin \
+  --admin-password SECURE_PASSWORD \
+  --sku-name Standard_D2ds_v4 \  # 2 vCPU, 8 GB RAM
+  --tier GeneralPurpose \
+  --storage-size 128 \  # GB
+  --version 15 \
+  --high-availability ZoneRedundant \
+  --backup-retention 7
+
+# Create databases
+az postgres flexible-server db create \
+  --resource-group mlops-rg \
+  --server-name mlops-postgres \
+  --database-name mlflow
+
+az postgres flexible-server db create \
+  --resource-group mlops-rg \
+  --server-name mlops-postgres \
+  --database-name airflow
+
+# Allow Container Apps to connect (private endpoint)
+az postgres flexible-server vnet-rule create \
+  --server-name mlops-postgres \
+  --resource-group mlops-rg \
+  --name containerapp-access \
+  --subnet /subscriptions/.../subnets/containerapp-subnet
+```
+
+**Built-in Features**:
+- **PgBouncer**: Connection pooling (handles 1000s of connections)
+- **Query Performance Insight**: Identify slow queries
+- **Intelligent Performance**: Automatic recommendations
+- **Geo-redundant backup**: Disaster recovery
+
+##### 3. Azure Blob Storage - Object Storage
+
+**What**: Azure's object storage (like S3, but with different tier structure)
+
+**Why Blob Storage**:
+- ✅ Hot/Cool/Archive tiers built-in (simpler than S3)
+- ✅ Immutable storage (WORM - Write Once Read Many)
+- ✅ Lifecycle management (auto-tiering)
+- ✅ Azure Data Lake Gen2 (for big data analytics)
+
+**Storage Tiers**:
+| Tier | Use Case | Cost (per GB/month) | Access Time |
+|------|----------|---------------------|-------------|
+| **Hot** | Frequently accessed (training data) | $0.0184 | Instant |
+| **Cool** | Infrequently accessed (<30 days) | $0.0100 | Instant |
+| **Archive** | Rarely accessed (long-term backup) | $0.0020 | 1-15 hours |
+
+**Our Blob Storage Setup**:
+```bash
+# Create storage account
+az storage account create \
+  --name mlopsdata$(date +%s) \  # Unique name
+  --resource-group mlops-rg \
+  --location eastus \
+  --sku Standard_LRS \  # Locally redundant
+  --kind StorageV2
+
+# Create containers (like S3 buckets)
+az storage container create \
+  --name mlops-data \
+  --account-name mlopsdata12345
+
+az storage container create \
+  --name mlflow-artifacts \
+  --account-name mlopsdata12345
+
+# Set lifecycle policy (auto-archive)
+cat > lifecycle-policy.json <<EOF
+{
+  "rules": [
+    {
+      "enabled": true,
+      "name": "move-to-cool",
+      "type": "Lifecycle",
+      "definition": {
+        "actions": {
+          "baseBlob": {
+            "tierToCool": {
+              "daysAfterModificationGreaterThan": 30
+            },
+            "tierToArchive": {
+              "daysAfterModificationGreaterThan": 90
+            },
+            "delete": {
+              "daysAfterModificationGreaterThan": 365
+            }
+          }
+        },
+        "filters": {
+          "blobTypes": ["blockBlob"]
+        }
+      }
+    }
+  ]
+}
+EOF
+
+az storage account management-policy create \
+  --account-name mlopsdata12345 \
+  --policy @lifecycle-policy.json
+```
+
+**Azure Data Lake Gen2** (for big data):
+- Hierarchical namespace (real folders, not prefixes)
+- POSIX-compliant (chmod, chown)
+- Better for Spark, Databricks
+- Same price as Blob Storage
+
+##### 4. Azure Machine Learning - Microsoft's ML Platform
+
+**What**: Comprehensive ML platform (competitor to SageMaker, Vertex AI)
+
+**Why consider Azure ML**:
+- ✅ MLflow integration (native support!)
+- ✅ AutoML (automated model selection)
+- ✅ Designer (drag-and-drop ML pipelines)
+- ✅ Compute clusters (auto-scaling)
+- ✅ Endpoints (managed deployment)
+- ✅ Responsible AI dashboard
+
+**Azure ML vs Our Stack**:
+
+| Feature | Our Stack | Azure ML |
+|---------|-----------|----------|
+| **Experiment Tracking** | MLflow | MLflow (built-in!) |
+| **Model Registry** | MLflow Registry | Azure ML Registry |
+| **Orchestration** | Airflow | Azure ML Pipelines |
+| **Serving** | FastAPI + Container Apps | Azure ML Endpoints |
+| **Monitoring** | EvidentlyAI | Azure ML Monitoring |
+| **Cost** | ~$200/month | ~$400-700/month |
+| **Flexibility** | ✅ Full control | ❌ Azure lock-in |
+
+**Key Advantage**: Azure ML has **native MLflow integration** - your existing MLflow code works without changes!
+
+```python
+# Your existing MLflow code works in Azure ML
+import mlflow
+from azureml.core import Workspace
+
+# Connect to Azure ML workspace
+ws = Workspace.from_config()
+mlflow.set_tracking_uri(ws.get_mlflow_tracking_uri())
+
+# Same MLflow code as before
+with mlflow.start_run():
+    mlflow.log_param("n_estimators", 100)
+    mlflow.sklearn.log_model(model, "model")
+```
+
+##### 5. Azure DevOps / GitHub Actions - CI/CD
+
+**What**: Azure's DevOps platform (alternative to GitHub Actions)
+
+**Azure Pipelines** (CI/CD):
+```yaml
+# azure-pipelines.yml
+trigger:
+  branches:
+    include:
+    - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Test
+  jobs:
+  - job: UnitTests
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.10'
+    - script: |
+        pip install -r requirements.txt
+        pytest tests/ --cov=src --cov-report=xml
+      displayName: 'Run tests'
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: 'coverage.xml'
+
+- stage: Build
+  dependsOn: Test
+  jobs:
+  - job: BuildDocker
+    steps:
+    - task: Docker@2
+      inputs:
+        command: 'buildAndPush'
+        repository: 'mlops-fastapi'
+        containerRegistry: 'mlopsregistry'
+        tags: '$(Build.BuildId)'
+
+- stage: Deploy
+  dependsOn: Build
+  jobs:
+  - job: DeployToAzure
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'mlops-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az containerapp update \
+            --name mlops-fastapi \
+            --resource-group mlops-rg \
+            --image mlopsregistry.azurecr.io/mlops-fastapi:$(Build.BuildId)
+```
+
+**GitHub Actions vs Azure DevOps**:
+| Feature | GitHub Actions | Azure DevOps |
+|---------|----------------|--------------|
+| **Integration** | GitHub-native | Azure-native |
+| **Free Tier** | 2,000 min/month | 1,800 min/month |
+| **Marketplace** | 10,000+ actions | 1,000+ tasks |
+| **Self-hosted** | ✅ Yes | ✅ Yes |
+| **Best For** | Open source, GitHub repos | Enterprise, Azure deployments |
+
+##### 6. AKS (Azure Kubernetes Service) - Managed Kubernetes
+
+**What**: Fully managed Kubernetes (if you need more control than Container Apps)
+
+**When to use AKS**:
+- Need full Kubernetes features (StatefulSets, DaemonSets, CRDs)
+- Running multiple services (Airflow, MLflow, Prometheus on same cluster)
+- Advanced networking (service mesh, ingress controllers)
+- Hybrid/multi-cloud (Kubernetes is portable)
+
+**AKS for MLOps**:
+```bash
+# Create AKS cluster
+az aks create \
+  --resource-group mlops-rg \
+  --name mlops-aks \
+  --node-count 3 \
+  --node-vm-size Standard_D4s_v3 \  # 4 vCPU, 16 GB
+  --enable-managed-identity \
+  --enable-addons monitoring \  # Azure Monitor
+  --generate-ssh-keys
+
+# Get credentials
+az aks get-credentials --resource-group mlops-rg --name mlops-aks
+
+# Deploy with Helm (same as any Kubernetes)
+helm repo add mlflow https://community-charts.github.io/helm-charts
+helm install mlflow mlflow/mlflow \
+  --set postgresql.enabled=false \
+  --set externalPostgresql.host=mlops-postgres.postgres.database.azure.com
+```
+
+**AKS Features**:
+- **Virtual Nodes**: Serverless (Azure Container Instances for burst)
+- **Azure Policy**: Enforce security policies
+- **Defender for Containers**: Security scanning
+- **GitOps**: Automated deployment from Git
+
+#### Azure Terraform Configuration
+
+**Terraform for Azure** (Azure Resource Manager provider):
+
+```hcl
+# terraform/azure/main.tf
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+# Resource Group
+resource "azurerm_resource_group" "mlops" {
+  name     = "mlops-rg"
+  location = "East US"
+}
+
+# Storage Account
+resource "azurerm_storage_account" "mlops" {
+  name                     = "mlopsdata${random_string.suffix.result}"
+  resource_group_name      = azurerm_resource_group.mlops.name
+  location                 = azurerm_resource_group.mlops.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+
+  blob_properties {
+    versioning_enabled = true
+  }
+}
+
+# Blob Containers
+resource "azurerm_storage_container" "data" {
+  name                  = "mlops-data"
+  storage_account_name  = azurerm_storage_account.mlops.name
+  container_access_type = "private"
+}
+
+# PostgreSQL Flexible Server
+resource "azurerm_postgresql_flexible_server" "mlops" {
+  name                   = "mlops-postgres-${random_string.suffix.result}"
+  resource_group_name    = azurerm_resource_group.mlops.name
+  location               = azurerm_resource_group.mlops.location
+  version                = "15"
+  administrator_login    = "mlflow_admin"
+  administrator_password = var.db_password
+
+  storage_mb            = 131072  # 128 GB
+  sku_name              = "GP_Standard_D2ds_v4"  # 2 vCPU, 8 GB
+  backup_retention_days = 7
+
+  high_availability {
+    mode = "ZoneRedundant"
+  }
+}
+
+# Container Apps Environment
+resource "azurerm_container_app_environment" "mlops" {
+  name                = "mlops-env"
+  resource_group_name = azurerm_resource_group.mlops.name
+  location            = azurerm_resource_group.mlops.location
+}
+
+# Container App (FastAPI)
+resource "azurerm_container_app" "fastapi" {
+  name                         = "mlops-fastapi"
+  container_app_environment_id = azurerm_container_app_environment.mlops.id
+  resource_group_name          = azurerm_resource_group.mlops.name
+  revision_mode                = "Single"
+
+  template {
+    container {
+      name   = "fastapi"
+      image  = "mlopsregistry.azurecr.io/mlops-fastapi:latest"
+      cpu    = 2.0
+      memory = "4Gi"
+
+      env {
+        name  = "MLFLOW_TRACKING_URI"
+        value = "postgresql://..."
+      }
+    }
+
+    min_replicas = 2
+    max_replicas = 100
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 8000
+
+    traffic_weight {
+      percentage      = 100
+      latest_revision = true
+    }
+  }
+}
+```
+
+#### Azure Cost Estimate (Monthly)
+
+| Azure Service | Configuration | Cost |
+|---------------|---------------|------|
+| **Container Apps** | 2-10 instances, 2 vCPU, 4 GB | $85 |
+| **PostgreSQL Flexible** | GP_Standard_D2ds_v4, Zone-HA | $90 |
+| **Blob Storage** | 100 GB Hot + 500 GB Cool | $4 |
+| **Front Door** | 1 endpoint | $35 |
+| **Container Registry** | Basic (50 GB) | $5 |
+| **Azure Monitor** | Logs (10 GB/month) | $7 |
+| **VNet** | Data transfer | $5 |
+| **Total** | | **~$231/month** |
+
+**Azure is ~24% cheaper than AWS, ~10% more than GCP**.
+
+#### Azure vs AWS/GCP - When to Choose Azure
+
+**Choose Azure when**:
+- ✅ Enterprise with Microsoft 365 / Office 365 (AAD integration)
+- ✅ Hybrid cloud (Azure Arc for on-prem + cloud)
+- ✅ Strong .NET workloads (first-class .NET support)
+- ✅ Government / regulated industries (Azure Gov, compliance certifications)
+
+**Azure Strengths**:
+- 🏆 Best hybrid cloud (Azure Arc, Azure Stack)
+- 🏆 Enterprise integration (AAD, Office 365, Dynamics)
+- 🏆 Compliance (most certifications: 90+)
+- 🏆 Windows workloads (obvious advantage)
+
+**Azure Weaknesses**:
+- ❌ Smaller ML community than AWS/GCP
+- ❌ Less mature serverless (Container Apps is new)
+- ❌ Documentation can be confusing (many service versions)
+
+#### Interview Talking Points - Azure
+
+**Q: "How would you deploy this on Azure?"**
+
+A: "I'd use Azure Container Apps for FastAPI - it's serverless like Cloud Run, but built on Kubernetes (KEDA), giving us flexibility without cluster management. The architecture would be:
+
+- Container Apps for FastAPI (serverless, scales 0-100)
+- Azure Database for PostgreSQL Flexible Server (zone-redundant HA)
+- Blob Storage for data and artifacts (hot/cool/archive tiers)
+- Front Door for global load balancing with WAF
+- Container Registry for Docker images
+
+Azure's advantage is enterprise integration - if the company uses Azure Active Directory, we get seamless SSO and RBAC. Container Apps also supports Dapr for microservices patterns. Cost would be ~$230/month, between AWS ($304) and GCP ($209)."
+
+**Q: "What about Azure ML vs our MLflow setup?"**
+
+A: "Azure ML has a huge advantage - it has **native MLflow integration**. Our existing MLflow code works without changes. You just point MLflow tracking URI to Azure ML workspace, and you get:
+
+- Same MLflow API we're using
+- Plus Azure ML features: AutoML, Designer, Compute clusters
+- Managed endpoints for deployment
+- Built-in monitoring and responsible AI
+
+For a Microsoft-heavy enterprise, Azure ML makes sense ($400-700/month). But for startups or multi-cloud strategy, I'd stick with our open-source MLflow stack ($200/month) to avoid vendor lock-in."
+
+### 8.10 Three-Cloud Comparison: AWS vs GCP vs Azure
+
+Now that we've covered all three major clouds, let's compare them comprehensively for MLOps workloads.
+
+#### Complete Service Mapping
+
+| Category | AWS | GCP | Azure | Open Source Alternative |
+|----------|-----|-----|-------|------------------------|
+| **Container Orchestration** | ECS Fargate | Cloud Run / GKE | Container Apps / AKS | Kubernetes, Docker Swarm |
+| **Managed Database** | RDS PostgreSQL | Cloud SQL | Azure Database (Flexible) | Self-hosted PostgreSQL |
+| **Object Storage** | S3 | Cloud Storage (GCS) | Blob Storage | MinIO, Ceph |
+| **Load Balancer** | ALB | Cloud Load Balancing | Front Door / App Gateway | NGINX, HAProxy |
+| **Container Registry** | ECR | Artifact Registry | ACR | Docker Hub, Harbor |
+| **Observability** | CloudWatch | Cloud Logging/Monitoring | Azure Monitor | Prometheus+Grafana, ELK |
+| **IAM** | AWS IAM | Cloud IAM | Azure AD + RBAC | Keycloak, OpenLDAP |
+| **Secrets** | Secrets Manager | Secret Manager | Key Vault | HashiCorp Vault |
+| **Serverless Compute** | Lambda | Cloud Functions | Azure Functions | OpenFaaS, Knative |
+| **ML Platform** | SageMaker | Vertex AI | Azure ML | MLflow, Kubeflow |
+| **Workflow Orchestration** | Step Functions | Cloud Workflows | Logic Apps | Airflow, Prefect |
+
+#### Cost Comparison for Our MLOps Workload
+
+| Service | AWS | GCP | Azure | Winner |
+|---------|-----|-----|-------|--------|
+| **Compute** (2-10 containers) | $120 | $90 | $85 | 🥇 Azure |
+| **Database** (2 vCPU, 8 GB, HA) | $80 | $70 | $90 | 🥇 GCP |
+| **Storage** (100 GB + 500 GB archived) | $5 | $4 | $4 | 🥇 GCP/Azure |
+| **Load Balancer** | $20 | $18 | $35 | 🥇 GCP |
+| **Container Registry** | $5 | $5 | $5 | 🤝 Tie |
+| **Logging/Monitoring** | $5 | $5 | $7 | 🥇 AWS/GCP |
+| **Data Transfer** | $9 | $12 | $5 | 🥇 Azure |
+| **NAT Gateway / VNet** | $60 | $0* | $5 | 🥇 GCP |
+| **Total Monthly** | **$304** | **$209** | **$231** | 🥇 **GCP wins** |
+
+*GCP includes NAT in VPC cost
+
+**Cost Winners**:
+- 🥇 **GCP**: $209/month (31% cheaper than AWS)
+- 🥈 **Azure**: $231/month (24% cheaper than AWS)
+- 🥉 **AWS**: $304/month (most expensive, but most features)
+
+#### Market Share & Job Opportunities
+
+| Cloud | Market Share (2024) | Job Postings (ML/Data) | Enterprise Adoption | Startups |
+|-------|---------------------|------------------------|---------------------|----------|
+| **AWS** | 32% | 60% 🥇 | 45% | 50% |
+| **Azure** | 23% | 25% 🥈 | 40% 🥇 | 20% |
+| **GCP** | 11% | 15% 🥉 | 15% | 30% 🥇 |
+
+**Key Insights**:
+- **AWS**: Dominant in job market (60% of ML/Data postings)
+- **Azure**: Strong in enterprise (Microsoft ecosystem)
+- **GCP**: Popular with startups (cost, innovation)
+
+#### Strengths & Weaknesses Summary
+
+**AWS Strengths** 🔶:
+- ✅ Largest service catalog (200+ services)
+- ✅ Most mature (17 years old)
+- ✅ Biggest job market (60% demand)
+- ✅ Best documentation and community
+- ✅ SageMaker is feature-rich
+- ✅ Global infrastructure (32 regions)
+
+**AWS Weaknesses**:
+- ❌ Most expensive (31% higher than GCP)
+- ❌ Complex pricing (hard to estimate)
+- ❌ Steeper learning curve
+- ❌ Vendor lock-in (hard to migrate off)
+
+**GCP Strengths** 🔵:
+- ✅ Cheapest (31% less than AWS)
+- ✅ Best for data/ML (BigQuery, Vertex AI, TPUs)
+- ✅ Simplest serverless (Cloud Run)
+- ✅ Kubernetes origins (GKE is best K8s)
+- ✅ Innovation (cutting-edge features)
+- ✅ Clean UI and APIs
+
+**GCP Weaknesses**:
+- ❌ Smaller job market (15% demand)
+- ❌ Fewer enterprise features
+- ❌ Smaller community
+- ❌ Less mature (compared to AWS)
+
+**Azure Strengths** 🔷:
+- ✅ Best hybrid cloud (Azure Arc)
+- ✅ Enterprise integration (AAD, Office 365)
+- ✅ Most compliance certifications (90+)
+- ✅ Strong .NET support
+- ✅ Government cloud (Azure Gov)
+- ✅ Growing ML platform (Azure ML)
+
+**Azure Weaknesses**:
+- ❌ Confusing naming (many versions of same service)
+- ❌ Smaller ML community
+- ❌ Documentation can be scattered
+- ❌ Less popular with startups
+
+#### ML-Specific Features Comparison
+
+| Feature | AWS SageMaker | GCP Vertex AI | Azure ML | Our Open-Source Stack |
+|---------|---------------|---------------|----------|----------------------|
+| **Experiment Tracking** | ✅ Yes | ✅ Yes | ✅ MLflow (native!) | ✅ MLflow |
+| **Model Registry** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ MLflow |
+| **AutoML** | ✅ Autopilot | ✅ AutoML | ✅ AutoML | ❌ No |
+| **Feature Store** | ✅ Yes | ✅ Yes | ❌ Preview | ❌ No (use Feast) |
+| **Model Monitoring** | ✅ Model Monitor | ✅ Model Monitoring | ✅ Yes | ✅ EvidentlyAI |
+| **Distributed Training** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Manual (Dask/Ray) |
+| **Explainability** | ✅ Clarify | ✅ Explainable AI | ✅ Responsible AI | ⚠️ Manual (SHAP) |
+| **Cost (monthly)** | $500-1000 | $500-800 | $400-700 | $200-300 |
+
+#### When to Choose Which Cloud?
+
+**Choose AWS when**:
+- ✅ Need broadest service catalog (200+ services)
+- ✅ Job market matters (60% of ML jobs)
+- ✅ Want mature, battle-tested platform
+- ✅ Need advanced features (SageMaker Studio, etc.)
+- ✅ Enterprise with existing AWS footprint
+
+**Choose GCP when**:
+- ✅ Budget-conscious (31% cheaper)
+- ✅ Data-intensive ML (BigQuery, Dataflow)
+- ✅ Want simplest deployment (Cloud Run)
+- ✅ Need TPUs for deep learning
+- ✅ Startup optimizing for cost
+
+**Choose Azure when**:
+- ✅ Microsoft shop (Office 365, AAD, .NET)
+- ✅ Hybrid cloud requirements (on-prem + cloud)
+- ✅ Government / regulated industry
+- ✅ Enterprise with Azure commitment
+- ✅ Want native MLflow integration (Azure ML)
+
+**Choose Multi-Cloud when**:
+- ✅ Avoid vendor lock-in
+- ✅ Optimize costs per region
+- ✅ Disaster recovery (spread risk)
+- ✅ Compliance requirements (data residency)
+
+#### Multi-Cloud Strategy (What We Built)
+
+Our architecture is **cloud-agnostic** by design:
+
+**Cloud-Agnostic Components**:
+- ✅ **MLflow**: Works on AWS, GCP, Azure (same code)
+- ✅ **Airflow**: Runs anywhere (Docker container)
+- ✅ **FastAPI**: Python app (deploy to any container service)
+- ✅ **Terraform**: Multi-cloud IaC (supports all 3 clouds)
+- ✅ **PostgreSQL**: Standard SQL (managed service on all 3)
+- ✅ **Docker**: Universal containerization
+
+**Cloud-Specific Components** (need mapping):
+- ⚠️ S3 → GCS → Blob Storage (object storage)
+- ⚠️ ECS → Cloud Run → Container Apps (container orchestration)
+- ⚠️ CloudWatch → Cloud Logging → Azure Monitor (observability)
+
+**How to Implement Multi-Cloud**:
+```hcl
+# terraform/modules/storage/
+# main.tf (abstraction layer)
+
+variable "cloud_provider" {
+  type = string  # "aws" | "gcp" | "azure"
+}
+
+module "storage" {
+  source = var.cloud_provider == "aws" ? "./aws" :
+           var.cloud_provider == "gcp" ? "./gcp" : "./azure"
+
+  bucket_name = "mlops-data"
+}
+
+# aws/main.tf
+resource "aws_s3_bucket" "data" {
+  bucket = var.bucket_name
+}
+
+# gcp/main.tf
+resource "google_storage_bucket" "data" {
+  name = var.bucket_name
+}
+
+# azure/main.tf
+resource "azurerm_storage_account" "data" {
+  name = var.bucket_name
+}
+```
+
+#### Interview Strategy: Discussing Clouds
+
+**For AWS-focused interviews**:
+1. Lead with AWS implementation (section 8.1-8.7)
+2. Mention "I also understand this could be done on GCP/Azure"
+3. If asked, discuss GCP/Azure equivalents (show breadth)
+
+**For GCP-focused interviews**:
+1. Lead with GCP implementation (section 8.8)
+2. Explain "I designed it on AWS first, but adapted to GCP"
+3. Highlight cost savings (31% cheaper) and Cloud Run advantages
+
+**For Azure-focused interviews**:
+1. Lead with Azure implementation (section 8.9)
+2. Emphasize Azure ML's native MLflow integration
+3. Discuss enterprise benefits (AAD, hybrid, compliance)
+
+**For cloud-agnostic interviews** (startups, consultancies):
+1. Discuss multi-cloud architecture approach
+2. Emphasize Terraform + open-source tools
+3. Show you can adapt to any cloud (flexibility)
+
+**Key Interview Message**:
+> "I designed this MLOps pipeline to be cloud-agnostic using Terraform and open-source tools (MLflow, Airflow, FastAPI). While I implemented it on AWS, I can deploy the same architecture on GCP or Azure with minimal changes. The core ML logic stays identical - only the infrastructure layer changes. This demonstrates I understand cloud fundamentals, not just one vendor's services."
+
+#### Final Recommendation for Learning
+
+**Learning Path**:
+1. **Start with AWS** (4 weeks) - 60% of job market
+2. **Add GCP** (2 weeks) - understand differences, cost optimization
+3. **Add Azure** (2 weeks) - complete picture, enterprise context
+
+**Total**: 8 weeks to become proficient across all 3 clouds
+
+**What to Focus On**:
+- ✅ Service mappings (memorize the table above)
+- ✅ Cost differences (GCP cheapest, AWS most expensive)
+- ✅ Terraform for all 3 (IaC is key to multi-cloud)
+- ✅ Kubernetes (portable across all clouds)
+- ✅ When to choose which cloud (business context)
+
+**Interview Preparation**:
+- Practice explaining same architecture on all 3 clouds (5 min each)
+- Memorize cost estimates ($304 AWS, $209 GCP, $231 Azure)
+- Be ready to discuss trade-offs (cost vs features vs market)
+
 ---
 
 ## 9. Monitoring Stack - Prometheus & Grafana
