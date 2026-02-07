@@ -1,8 +1,13 @@
 # MLOps Fraud Detection Pipeline
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]()
+[![CI Pipeline](https://github.com/aswithabukka/mlops-fraud-detection/actions/workflows/ci.yml/badge.svg)](https://github.com/aswithabukka/mlops-fraud-detection/actions/workflows/ci.yml)
+[![CD Pipeline](https://github.com/aswithabukka/mlops-fraud-detection/actions/workflows/cd.yml/badge.svg)](https://github.com/aswithabukka/mlops-fraud-detection/actions/workflows/cd.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![MLOps](https://img.shields.io/badge/MLOps-Production%20Ready-green.svg)](https://github.com/aswithabukka/mlops-fraud-detection)
+[![AWS](https://img.shields.io/badge/AWS-Terraform-orange.svg)](deployment/aws/terraform/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 A production-grade, end-to-end MLOps pipeline for **credit card fraud detection** showcasing industry best practices in ML system design, deployment, and monitoring.
 
