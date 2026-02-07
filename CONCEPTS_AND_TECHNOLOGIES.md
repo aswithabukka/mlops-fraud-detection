@@ -2090,6 +2090,531 @@ FastAPI can **read** from S3, but **cannot delete or modify** (least privilege).
 - S3 Intelligent-Tiering (auto-moves to cheaper storage)
 - Reduce NAT Gateway usage (use VPC endpoints for S3, ECR)
 
+### 8.8 GCP Alternative Architecture
+
+For interviews, you should be able to discuss how to implement the same MLOps pipeline on **Google Cloud Platform (GCP)**. Here's a complete mapping of AWS services to GCP equivalents.
+
+#### AWS to GCP Service Mapping
+
+| AWS Service | GCP Equivalent | Purpose | Key Differences |
+|-------------|----------------|---------|-----------------|
+| **ECS Fargate** | Cloud Run / GKE Autopilot | Container orchestration | Cloud Run is simpler (serverless), GKE is more powerful |
+| **RDS PostgreSQL** | Cloud SQL for PostgreSQL | Managed database | Similar features, slightly cheaper on GCP |
+| **S3** | Cloud Storage (GCS) | Object storage | GCS has flat namespace (no "folders"), better for ML |
+| **ALB** | Cloud Load Balancing | Load balancer | GCP's is global by default, AWS is regional |
+| **ECR** | Artifact Registry / Container Registry | Docker images | Artifact Registry supports multi-format (Docker, Maven, npm) |
+| **CloudWatch** | Cloud Logging + Cloud Monitoring | Observability | GCP separates logging and monitoring into 2 services |
+| **IAM** | Cloud IAM | Security | Similar concepts, GCP has more granular roles |
+| **Secrets Manager** | Secret Manager | Secrets storage | Nearly identical |
+| **Lambda** | Cloud Functions / Cloud Run | Serverless compute | Cloud Run supports containers (more flexible) |
+| **Step Functions** | Cloud Workflows | Orchestration | GCP alternative, but Airflow is better for ML |
+
+#### GCP MLOps Architecture
+
+**Our pipeline reimagined on GCP**:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Google Cloud Platform MLOps Architecture                    │
+└─────────────────────────────────────────────────────────────┘
+
+                        ┌─────────────────┐
+                        │   Internet      │
+                        └────────┬────────┘
+                                 │
+              ┌──────────────────▼──────────────────┐
+              │  Cloud Load Balancing (Global)      │
+              │  - SSL Termination                  │
+              │  - Health Checks                    │
+              └──────────────┬──────────────────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        │                    │                    │
+  ┌─────▼──────┐      ┌─────▼──────┐      ┌─────▼──────┐
+  │ Cloud Run  │      │ Cloud Run  │      │ Cloud Run  │
+  │ (FastAPI)  │      │ (FastAPI)  │ ...  │ (FastAPI)  │
+  │ Instance 1 │      │ Instance 2 │      │ Instance N │
+  └─────┬──────┘      └─────┬──────┘      └─────┬──────┘
+        │                    │                    │
+        └────────────────────┼────────────────────┘
+                             │
+              ┌──────────────▼──────────────────┐
+              │  Cloud SQL for PostgreSQL       │
+              │  (Multi-zone HA)                │
+              │  - MLflow metadata              │
+              │  - Airflow metadata             │
+              └──────────────┬──────────────────┘
+                             │
+              ┌──────────────▼──────────────────┐
+              │  Cloud Storage (GCS)            │
+              │  - Data (raw, processed)        │
+              │  - MLflow artifacts             │
+              │  - Prediction logs              │
+              └─────────────────────────────────┘
+```
+
+#### GCP Services Deep Dive
+
+##### 1. Cloud Run - Serverless Container Platform
+
+**What**: Fully managed serverless platform for containerized applications (like Fargate, but simpler)
+
+**Why better than ECS for ML**:
+- ✅ Auto-scales to zero (pay only when serving requests)
+- ✅ Scales to thousands of instances in seconds
+- ✅ No cluster management (truly serverless)
+- ✅ Automatic SSL certificates
+- ✅ Built-in traffic splitting (for A/B testing models)
+
+**Our FastAPI on Cloud Run**:
+```yaml
+# cloudrun-fastapi.yaml
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: mlops-fastapi
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "2"  # Always 2 instances running
+        autoscaling.knative.dev/maxScale: "100"  # Scale up to 100
+    spec:
+      containers:
+      - image: gcr.io/PROJECT_ID/mlops-fastapi:latest
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        env:
+        - name: MLFLOW_TRACKING_URI
+          value: "http://mlflow-internal:5000"
+        - name: MODEL_STAGE
+          value: "Production"
+```
+
+**Deploy with**:
+```bash
+# Build and push to Artifact Registry
+gcloud builds submit --tag gcr.io/PROJECT_ID/mlops-fastapi
+
+# Deploy to Cloud Run
+gcloud run deploy mlops-fastapi \
+  --image gcr.io/PROJECT_ID/mlops-fastapi:latest \
+  --platform managed \
+  --region us-central1 \
+  --min-instances 2 \
+  --max-instances 100 \
+  --cpu 2 \
+  --memory 4Gi \
+  --allow-unauthenticated
+```
+
+**Cloud Run Advantages for ML**:
+- 🚀 Cold start: <1 second (vs Lambda's 5-10s for ML models)
+- 💰 Cost: Pay per request (free tier: 2M requests/month)
+- 📈 Scaling: 0 → 1000 instances in <10 seconds
+- 🔄 Traffic splitting: Route 10% to new model, 90% to old (canary deployment)
+
+##### 2. Cloud SQL - Managed PostgreSQL
+
+**What**: Fully managed PostgreSQL (like RDS, but with better integration)
+
+**Advantages over RDS**:
+- ✅ Automatic storage increase (no manual scaling)
+- ✅ Cloud SQL Proxy (secure connection without VPN)
+- ✅ Integrated with Cloud Run (private IP connection)
+
+**Our Cloud SQL Setup**:
+```bash
+# Create PostgreSQL instance
+gcloud sql instances create mlops-postgres \
+  --database-version=POSTGRES_15 \
+  --tier=db-custom-2-7680 \  # 2 vCPU, 7.5 GB RAM
+  --region=us-central1 \
+  --availability-type=REGIONAL \  # Multi-zone HA
+  --backup-start-time=03:00 \
+  --enable-bin-log \
+  --database-flags=max_connections=200
+
+# Create databases
+gcloud sql databases create mlflow --instance=mlops-postgres
+gcloud sql databases create airflow --instance=mlops-postgres
+
+# Create user
+gcloud sql users create mlflow_user \
+  --instance=mlops-postgres \
+  --password=SECURE_PASSWORD
+```
+
+**Cloud SQL Proxy** (secure connection):
+```python
+# No need for VPN or whitelisting IPs
+# Cloud SQL Proxy handles authentication via IAM
+
+import sqlalchemy
+
+# Connection string format
+db_connection = sqlalchemy.create_engine(
+    f"postgresql+psycopg2://user:pass@/mlflow?"
+    f"host=/cloudsql/PROJECT_ID:REGION:INSTANCE_NAME"
+)
+```
+
+##### 3. Cloud Storage (GCS) - Object Storage
+
+**What**: Google's object storage (like S3, but optimized for ML workloads)
+
+**Advantages over S3**:
+- ✅ Flat namespace (no "folders" - better for ML datasets)
+- ✅ Faster for ML training (optimized for TensorFlow, PyTorch)
+- ✅ Automatic multi-region replication
+- ✅ Object lifecycle management (same as S3)
+- ✅ Strong consistency (S3 only added this recently)
+
+**Our GCS Buckets**:
+```bash
+# Create buckets
+gsutil mb -c STANDARD -l us-central1 gs://mlops-data-PROJECT_ID
+gsutil mb -c STANDARD -l us-central1 gs://mlops-mlflow-artifacts-PROJECT_ID
+
+# Set lifecycle policy (auto-archive old data)
+cat > lifecycle.json <<EOF
+{
+  "lifecycle": {
+    "rule": [
+      {
+        "action": {"type": "SetStorageClass", "storageClass": "NEARLINE"},
+        "condition": {"age": 90}
+      },
+      {
+        "action": {"type": "SetStorageClass", "storageClass": "COLDLINE"},
+        "condition": {"age": 180}
+      },
+      {
+        "action": {"type": "Delete"},
+        "condition": {"age": 365}
+      }
+    ]
+  }
+}
+EOF
+
+gsutil lifecycle set lifecycle.json gs://mlops-data-PROJECT_ID
+```
+
+**Storage Classes** (like S3 tiers):
+| Class | Use Case | Cost (per GB/month) | Retrieval Cost |
+|-------|----------|---------------------|----------------|
+| **Standard** | Hot data (training, recent predictions) | $0.020 | Free |
+| **Nearline** | Accessed < 1/month (old data) | $0.010 | $0.01/GB |
+| **Coldline** | Accessed < 1/quarter (archives) | $0.004 | $0.02/GB |
+| **Archive** | Long-term backups | $0.0012 | $0.05/GB |
+
+##### 4. Vertex AI - Google's ML Platform
+
+**What**: Unified ML platform (combines training, deployment, monitoring)
+
+**Why consider Vertex AI**:
+- ✅ Managed MLflow alternative (Vertex AI Experiments)
+- ✅ Feature Store (for feature engineering at scale)
+- ✅ Model Monitoring (drift detection built-in)
+- ✅ Explainable AI (SHAP, integrated coefficients)
+- ✅ Pipelines (Kubeflow Pipelines, alternative to Airflow)
+
+**Vertex AI vs Our Stack**:
+
+| Feature | Our Stack | Vertex AI |
+|---------|-----------|-----------|
+| **Experiment Tracking** | MLflow | Vertex AI Experiments |
+| **Model Registry** | MLflow Registry | Vertex AI Model Registry |
+| **Orchestration** | Airflow | Vertex AI Pipelines |
+| **Serving** | FastAPI + Cloud Run | Vertex AI Endpoints |
+| **Monitoring** | EvidentlyAI | Vertex AI Model Monitoring |
+| **Cost** | ~$300/month | ~$500-800/month |
+| **Flexibility** | ✅ Full control | ❌ Vendor lock-in |
+| **Setup Time** | 1-2 weeks | 2-3 days |
+
+**When to use Vertex AI**:
+- ✅ Team < 5 engineers (less maintenance)
+- ✅ Budget > $1000/month (enterprise)
+- ✅ Need Google-specific features (TPU training, AutoML)
+- ✅ Want managed solution (less DevOps)
+
+**When to use our stack**:
+- ✅ Want to learn MLOps deeply (more control)
+- ✅ Budget < $500/month
+- ✅ Multi-cloud strategy (avoid lock-in)
+- ✅ Custom ML workflows
+
+##### 5. Cloud Build - CI/CD (GitHub Actions Alternative)
+
+**What**: GCP's native CI/CD service (like GitHub Actions, but GCP-native)
+
+**Cloud Build for MLOps**:
+```yaml
+# cloudbuild.yaml
+steps:
+  # Step 1: Run tests
+  - name: 'python:3.10'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        pip install -r requirements.txt
+        pytest tests/ --cov=src --cov-report=xml
+
+  # Step 2: Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/mlops-fastapi:$SHORT_SHA', '.']
+
+  # Step 3: Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/mlops-fastapi:$SHORT_SHA']
+
+  # Step 4: Deploy to Cloud Run
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'mlops-fastapi'
+      - '--image=gcr.io/$PROJECT_ID/mlops-fastapi:$SHORT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+
+# Trigger on GitHub push
+images:
+  - 'gcr.io/$PROJECT_ID/mlops-fastapi:$SHORT_SHA'
+```
+
+**Trigger from GitHub**:
+```bash
+# Connect GitHub repo
+gcloud beta builds triggers create github \
+  --repo-name=mlops-fraud-detection \
+  --repo-owner=aswithabukka \
+  --branch-pattern="^main$" \
+  --build-config=cloudbuild.yaml
+```
+
+##### 6. GKE Autopilot (Kubernetes Alternative)
+
+**What**: Fully managed Kubernetes (if you need more control than Cloud Run)
+
+**When to use GKE over Cloud Run**:
+- Need Kubernetes features (StatefulSets, DaemonSets)
+- Running Airflow, MLflow, Prometheus on same cluster
+- Multi-service orchestration
+- Advanced networking (service mesh)
+
+**GKE Autopilot for MLOps**:
+- ✅ No node management (Google manages nodes)
+- ✅ Pay per pod (not per node)
+- ✅ Auto-scaling (0 → N pods)
+- ✅ Integrated with GCP services
+
+**Cost comparison** (for our workload):
+| Platform | Configuration | Monthly Cost |
+|----------|---------------|--------------|
+| **Cloud Run** | 2-10 instances, 2 vCPU, 4 GB | $80-120 |
+| **GKE Autopilot** | Same workload | $150-200 |
+| **ECS Fargate** | Same workload | $120-180 |
+
+#### GCP Terraform Configuration
+
+**Terraform for GCP** (similar to AWS):
+
+```hcl
+# terraform/gcp/main.tf
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "google" {
+  project = var.project_id
+  region  = var.region
+}
+
+# Cloud Storage buckets
+resource "google_storage_bucket" "data" {
+  name          = "mlops-data-${var.project_id}"
+  location      = var.region
+  storage_class = "STANDARD"
+
+  versioning {
+    enabled = true
+  }
+
+  lifecycle_rule {
+    action {
+      type          = "SetStorageClass"
+      storage_class = "NEARLINE"
+    }
+    condition {
+      age = 90
+    }
+  }
+}
+
+# Cloud SQL PostgreSQL
+resource "google_sql_database_instance" "mlops_postgres" {
+  name             = "mlops-postgres-${random_id.db_name_suffix.hex}"
+  database_version = "POSTGRES_15"
+  region           = var.region
+
+  settings {
+    tier              = "db-custom-2-7680"
+    availability_type = "REGIONAL"  # Multi-zone HA
+
+    backup_configuration {
+      enabled    = true
+      start_time = "03:00"
+    }
+
+    ip_configuration {
+      ipv4_enabled    = false
+      private_network = google_compute_network.vpc.id
+    }
+  }
+}
+
+# Cloud Run service
+resource "google_cloud_run_service" "fastapi" {
+  name     = "mlops-fastapi"
+  location = var.region
+
+  template {
+    spec {
+      containers {
+        image = "gcr.io/${var.project_id}/mlops-fastapi:latest"
+
+        resources {
+          limits = {
+            cpu    = "2"
+            memory = "4Gi"
+          }
+        }
+
+        env {
+          name  = "MLFLOW_TRACKING_URI"
+          value = "postgresql://..."
+        }
+      }
+    }
+
+    metadata {
+      annotations = {
+        "autoscaling.knative.dev/minScale" = "2"
+        "autoscaling.knative.dev/maxScale" = "100"
+      }
+    }
+  }
+
+  traffic {
+    percent         = 100
+    latest_revision = true
+  }
+}
+
+# Allow unauthenticated access (for public API)
+resource "google_cloud_run_service_iam_member" "public_access" {
+  service  = google_cloud_run_service.fastapi.name
+  location = google_cloud_run_service.fastapi.location
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+```
+
+#### GCP Cost Estimate (Monthly)
+
+| GCP Service | Configuration | Cost |
+|-------------|---------------|------|
+| **Cloud Run** | 2-10 instances, 2 vCPU, 4 GB | $90 |
+| **Cloud SQL** | db-custom-2-7680, Multi-zone | $70 |
+| **Cloud Storage** | 100 GB Standard + 500 GB Nearline | $4 |
+| **Load Balancer** | 1 global LB | $18 |
+| **Artifact Registry** | 50 GB images | $5 |
+| **Cloud Logging** | 10 GB/month | $5 |
+| **Cloud Monitoring** | Metrics collection | $5 |
+| **Data Transfer** | 100 GB egress | $12 |
+| **Total** | | **~$209/month** |
+
+**GCP is ~30% cheaper than AWS** for this workload because:
+- Cloud Run scales to zero (no idle cost)
+- No NAT Gateway cost (GCP includes in VPC)
+- Global load balancer costs less
+- Cloud SQL slightly cheaper than RDS
+
+#### AWS vs GCP - Which to Choose?
+
+| Factor | AWS | GCP | Winner |
+|--------|-----|-----|--------|
+| **Cost** | $304/month | $209/month | 🏆 GCP |
+| **Ease of Use** | Medium | Easy | 🏆 GCP (Cloud Run is simpler) |
+| **ML Features** | SageMaker | Vertex AI | 🤝 Tie (both excellent) |
+| **Job Market** | 60% of companies | 25% of companies | 🏆 AWS |
+| **Documentation** | Excellent | Good | 🏆 AWS |
+| **Community** | Huge | Medium | 🏆 AWS |
+| **Multi-cloud** | ❌ Lock-in | ❌ Lock-in | 🤝 Tie |
+| **Serverless ML** | Lambda (15 min limit) | Cloud Run (no limit) | 🏆 GCP |
+
+**Our recommendation for interviews**:
+- **Learn AWS first** (60% of job postings)
+- **Then learn GCP** (shows adaptability)
+- **Understand mappings** (can discuss trade-offs)
+
+#### Interview Talking Points - GCP
+
+**Q: "How would you deploy this on GCP instead of AWS?"**
+
+A: "I'd use Cloud Run instead of ECS Fargate for the FastAPI service - it's fully serverless, scales to zero when not in use, and can handle thousands of instances during peak loads. The architecture would be very similar:
+
+- Cloud Run for FastAPI (serverless containers)
+- Cloud SQL for PostgreSQL (MLflow + Airflow metadata)
+- Cloud Storage for data and model artifacts
+- Cloud Load Balancing for traffic distribution
+- Artifact Registry for Docker images
+
+The main advantages would be 30% cost savings due to Cloud Run's scale-to-zero capability, and simpler deployment (no cluster management). I'd still use the same open-source stack (MLflow, Airflow, EvidentlyAI) to avoid vendor lock-in."
+
+**Q: "What about Vertex AI vs MLflow?"**
+
+A: "Vertex AI is Google's managed ML platform - it provides experiment tracking, model registry, and monitoring out-of-the-box. For a large enterprise with budget >$1000/month, Vertex AI reduces operational overhead.
+
+However, I chose MLflow because:
+1. Open source (no vendor lock-in)
+2. Works on any cloud (AWS, GCP, Azure)
+3. More flexible for custom workflows
+4. Free (vs $500-800/month for Vertex AI)
+5. Better for learning (understand internals)
+
+That said, if I joined a company already using Vertex AI, I'd leverage it - the concepts are the same (experiment tracking, model versioning, serving)."
+
+**Q: "Which cloud is better for ML?"**
+
+A: "Both AWS and GCP are excellent for ML, but they have different strengths:
+
+**AWS strengths**:
+- Broader service catalog (200+ services)
+- Larger job market (more demand)
+- Better documentation and community
+- SageMaker is mature and feature-rich
+
+**GCP strengths**:
+- Better for data-intensive ML (BigQuery, Dataflow)
+- Vertex AI has integrated features (Feature Store, AutoML)
+- Cloud Run is superior for serverless ML serving
+- 30% cheaper for our workload
+
+For startups, I'd recommend GCP for cost savings and simplicity. For enterprises, AWS for ecosystem and talent pool. Ideally, design cloud-agnostic architecture (what we did with Terraform + open-source tools) so you can switch if needed."
+
 ---
 
 ## 9. Monitoring Stack - Prometheus & Grafana
